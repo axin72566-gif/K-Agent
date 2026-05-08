@@ -6,6 +6,35 @@ spring:
       chat:
         options:
           model: deepseek-v4-flash
+  data:
+    redis:
+      host: 192.168.60.131
+      port: 6379
+      database: 0
+      timeout: 60000
+      lettuce:
+        pool:
+          max-active: 8      # 最大连接数，默认8
+          max-idle: 8        # 最大空闲连接数，默认8
+          min-idle: 0        # 最小空闲连接数，默认0
+          max-wait: -1ms     # 连接池耗尽时，最大等待时间，-1表示永不超时
+  datasource:
+    url: jdbc:mysql://192.168.60.131:3306/k_agent?useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=utf8mb4&allowPublicKeyRetrieval=true
+    username: root
+    password: kdkt1412@
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    # HikariCP连接池配置
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 5
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+      connection-test-query: SELECT 1
+
+mybatis:
+  configuration:
+    map-underscore-to-camel-case: true
 
 serp-api:
   api-key: ${SERPAPI_API_KEY:77324aad16e2bf5c7d16eec65a46b0b3830492496ac5cf178ff44a3570aadf4d}

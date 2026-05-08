@@ -1,0 +1,140 @@
+  一个请求的完整数据流
+  用户输入: userId="user-001", sessionId="s1", question="它的价格是多少？"
+
+  Phase 1：加载记忆（构建 Prompt 之前）
+
+  ReActAgent.run("user-001", "s1", "它的价格是多少？")
+    │
+    ├─(1) UserProfileManager.getProfile("user-001")
+    │     │
+    │     └─ Redis HGETALL user:user-001:profile
+    │          ┌─────────────────────────┐
+    │          │ role → "后端开发"        │
+    │          │ techStack → "Java/Spring"│
+    │          │ preferences → ""         │
+    │          │ currentProject → ""      │
+    │          │ extra → "{}"            │
+    │          │ updatedAt → "2026-..."   │
+    │          └─────────────────────────┘
+    │          ↓
+    │     UserProfile.toPromptText()
+    │       → "用户画像：角色=后端开发；技术栈=Java/Spring；"
+    │          ↓
+    │     userProfileText = "你正在与以下用户对话：\n用户画像：...\n"
+    │
+    ├─(2) SessionManager.prepareConversationHistory("s1", "它的价格是多少？")
+    │     │
+    │     ├─ loadFromRedis("s1")
+    │     │   ┌─────────────────────────┐
+    │     │   │ GET session:s1 → JSON   │
+    │     │   │ Deserialize → AgentSession │
+    │     │   │ turns = [{Q1,A1}]       │
+    │     │   │ summary = null          │
+    │     │   └─────────────────────────┘
+    │     │
+    │     ├─ isTopicSwitch?(session, "它的价格是多少？")
+    │     │   → LLM([摘要:"Q1: ... 最新GPU?" + "它的价格？"]) → "相关"
+    │     │   → 不切换
+    │     │
+    │     └─ formatHistory(session)
+    │         → "以下是你与用户之前的对话历史：
+    │            --- 第 1 轮 ---
+    │            用户问：最新 GPU 型号？
+    │            你回答：RTX 5090
+    │            以上是历史对话。...\n"
+    │
+    ├─(3) history.clear()  // 清空本轮的步骤级历史
+    │
+    └─(4) 拼接 Prompt
+
+  Phase 2：拼接 Prompt
+
+  ┌──────────────────────────────────────────────────────────┐
+  │ 请注意，你是一个能够调用外部工具的智能助手。                │  ← 固定
+  │ 你正在与以下用户对话：                                    │  ← {userProfile}
+  │ 用户画像：角色=后端开发；技术栈=Java/Spring；              │    (Redis Hash)
+  │                                                          │
+  │ 可用工具如下：                                            │  ← {tools}
+  │ - Search: 一个网络搜索引擎。...                            │
+  │                                                          │
+  │ 请严格按照以下格式回复：                                   │  ← 格式约束
+  │ Thought: ...                                             │
+  │ Action: ...                                              │
+  │                                                          │
+  │ 以下是你与用户之前的对话历史：                              │  ← {conversationHistory}
+  │ --- 第 1 轮 ---                                          │    (Redis String)
+  │ 用户问：最新 GPU 型号？                                   │
+  │ 你回答：RTX 5090                                         │
+  │ 以上是历史对话。现在请继续回答用户的新问题。                 │
+  │                                                          │
+  │ 现在，请开始解决以下问题：                                 │
+  │ Question: 它的价格是多少？                                │  ← 用户当前输入
+  │ 当前步骤历史：                                            │  ← {stepHistory}
+  │                                                          │    (内存 List, 首步为空)
+  └──────────────────────────────────────────────────────────┘
+            │
+            ▼
+      llmClient.think([Prompt]) → 流式输出 → 收集响应
+
+  Phase 3：ReAct 推理循环（逐步推进）
+
+  Step 1:
+    Prompt(stepHistory="") → LLM → "Thought: 我需要查找RTX 5090的价格\nAction: Search[NVIDIA RTX 5090 价格]"
+    → ToolExecutor.execute("Search", "NVIDIA RTX 5090 价格")
+    → Observation: "RTX 5090 国内售价约 ¥12,999..."
+    → history.add("Action: Search[...]")
+    → history.add("Observation: RTX 5090 国内售价约...")
+
+  Step 2:
+    Prompt(stepHistory="Action: Search...\nObservation: RTX 5090 售价...")
+    → LLM → "Thought: 已获得价格信息\nAction: Finish[RTX 5090 价格约 ¥12,999]"
+    → 匹配 FINISH_PATTERN → 提取答案 "RTX 5090 价格约 ¥12,999"
+
+  Phase 4：持久化（推理完成之后）
+
+  saveTurnAndProfile("user-001", "s1", "它的价格是多少？", "RTX 5090 约 ¥12,999")
+    │
+    ├─(1) SessionManager.addTurn("s1", Q, A)
+    │     │
+    │     ├─ session.turns.add({Q2, A2})
+    │     │   turns.size() = 2, 未超 maxTurns(5) → 不触发摘要
+    │     │
+    │     └─ saveToRedis(session)
+    │         → Jackson serialize → JSON
+    │         → Redis SETEX session:s1 {JSON} 1800
+    │
+    └─(2) UserProfileManager.extractAndUpdate("user-001", Q, A)
+          │
+          ├─ getProfile("user-001") → 读取现有画像
+          ├─ LLM(提取Prompt + 对话 + 已有画像) → JSON
+          │   → {"role": "后端开发", "techStack": "Java/Spring"}
+          │   → 与已有画像对比，无变化 → 不写入
+          │
+          └─ mergeProfile() → changed=false → 跳过 saveProfile
+
+  ---
+  Phase 5：下次请求时
+
+  新一轮: run("user-001", "s1", "推荐GPU")
+
+  (1) getProfile → Redis HGETALL → "角色=后端开发；技术栈=Java"
+      → userProfileText = "你正在与以下用户对话：\n用户画像：..."
+
+  (2) prepareConversationHistory → GET session:s1
+      → turns = [{Q1,A1}, {Q2,A2}]
+      → formatHistory → 两轮完整对话 + 摘要(空)
+      → conversationHistory = "--- 第1轮 --- ...第2轮..."
+
+  (3) Prompt 同时包含: 用户画像 + 会话历史 + 当前问题
+      → Agent 知道用户是后端开发 + 之前聊过 RTX 5090
+
+  ---
+  存储层总览
+
+  Redis 实例 (192.168.60.131:6379)
+    │
+    ├─ session:s1          → JSON (AgentSession)   TTL=30min, 每次操作续期
+    ├─ session:s2          → JSON (AgentSession)   TTL=30min
+    │
+    ├─ user:user-001:profile → Hash {role, techStack, preferences, extra, ...}  TTL=永久
+    └─ user:user-002:profile → Hash {role, ...}    TTL=永久

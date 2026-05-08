@@ -1,5 +1,8 @@
 package com.axin.kagent.session;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -12,18 +15,35 @@ import java.util.List;
 public class AgentSession {
 
     private final String sessionId;
-    private final List<ConversationTurn> turns = new ArrayList<>();
-    /** 当前话题的摘要——窗口溢出轮次的压缩 */
+    private final List<ConversationTurn> turns;
     private String summary;
-    /** 之前话题的摘要归档——话题切换时旧摘要移入此处 */
     private String archivedSummary;
     private final Instant createdAt;
     private Instant lastActiveAt;
 
+    /** 正常创建会话时使用 */
     public AgentSession(String sessionId) {
         this.sessionId = sessionId;
+        this.turns = new ArrayList<>();
         this.createdAt = Instant.now();
         this.lastActiveAt = this.createdAt;
+    }
+
+    /** Jackson 反序列化用 */
+    @JsonCreator
+    public AgentSession(
+            @JsonProperty("sessionId") String sessionId,
+            @JsonProperty("turns") List<ConversationTurn> turns,
+            @JsonProperty("summary") String summary,
+            @JsonProperty("archivedSummary") String archivedSummary,
+            @JsonProperty("createdAt") Instant createdAt,
+            @JsonProperty("lastActiveAt") Instant lastActiveAt) {
+        this.sessionId = sessionId;
+        this.turns = turns != null ? new ArrayList<>(turns) : new ArrayList<>();
+        this.summary = summary;
+        this.archivedSummary = archivedSummary;
+        this.createdAt = createdAt;
+        this.lastActiveAt = lastActiveAt != null ? lastActiveAt : createdAt;
     }
 
     public String getSessionId() { return sessionId; }

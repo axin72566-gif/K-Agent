@@ -20,7 +20,8 @@
       "Bash(javap -cp agentscope-1.0.12.jar io.agentscope.core.ReActAgent)",
       "Bash(javap -cp agentscope-1.0.12.jar io.agentscope.core.model.Model)",
       "Bash(javap -cp agentscope-1.0.12.jar io.agentscope.core.agent.StructuredOutputCapableAgent)",
-      "Bash(./mvnw test-compile *)"
+      "Bash(./mvnw test-compile *)",
+      "mcp__ide__getDiagnostics"
     ]
   }
 }

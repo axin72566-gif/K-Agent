@@ -2,6 +2,7 @@ package com.axin.kagent.agent.react;
 
 import com.axin.kagent.llm.LlmClient;
 import com.axin.kagent.llm.Message;
+import com.axin.kagent.session.SessionManager;
 import com.axin.kagent.tool.ToolExecutor;
 
 import java.util.ArrayList;
@@ -79,9 +80,11 @@ public class ReActAgent {
         - Finish[最终答案]：当你认为已获得最终答案时使用。
         - 当你收集到足够信息来回答用户的最终问题时，必须在 Action: 字段后使用 Finish[最终答案] 来输出最终答案。
 
+        {conversationHistory}
         现在，请开始解决以下问题：
         Question: {question}
-        History: {history}
+        当前步骤历史：
+        {stepHistory}
         """;
 
     /**
@@ -191,6 +194,9 @@ public class ReActAgent {
      */
     private final List<String> history;
 
+    /** 会话管理器，管理多轮对话上下文 */
+    private final SessionManager sessionManager;
+
     /**
      * 创建 ReActAgent 并指定最大步数。
      *
@@ -198,9 +204,11 @@ public class ReActAgent {
      * @param toolExecutor 工具执行器，包含已注册的工具列表，不能为 {@code null}
      * @param maxSteps     ReAct 循环的最大步数，建议取值范围 3~10
      */
-    public ReActAgent(LlmClient llmClient, ToolExecutor toolExecutor, int maxSteps) {
+    public ReActAgent(LlmClient llmClient, ToolExecutor toolExecutor,
+                      SessionManager sessionManager, int maxSteps) {
         this.llmClient = llmClient;
         this.toolExecutor = toolExecutor;
+        this.sessionManager = sessionManager;
         this.maxSteps = maxSteps;
         this.history = new ArrayList<>();
     }
@@ -208,11 +216,13 @@ public class ReActAgent {
     /**
      * 创建 ReActAgent，使用默认最大步数 5。
      *
-     * @param llmClient    大模型客户端，不能为 {@code null}
-     * @param toolExecutor 工具执行器，包含已注册的工具列表，不能为 {@code null}
+     * @param llmClient      大模型客户端，不能为 {@code null}
+     * @param toolExecutor   工具执行器，包含已注册的工具列表，不能为 {@code null}
+     * @param sessionManager 会话管理器，管理多轮对话上下文，不能为 {@code null}
      */
-    public ReActAgent(LlmClient llmClient, ToolExecutor toolExecutor) {
-        this(llmClient, toolExecutor, 5);
+    public ReActAgent(LlmClient llmClient, ToolExecutor toolExecutor,
+                      SessionManager sessionManager) {
+        this(llmClient, toolExecutor, sessionManager, 5);
     }
 
     /**
@@ -246,6 +256,132 @@ public class ReActAgent {
      * @return 模型的最终答案；在最坏情况下返回提示信息，不再返回 {@code null}
      */
     public String run(String question) {
+        return run(null, question);
+    }
+
+    /**
+     * 执行 ReAct 主循环，带多轮对话上下文。
+     *
+     * <p>与 {@link #run(String)} 的区别：
+     * <ul>
+     *   <li>从 SessionManager 加载当前会话的历史对话，注入 Prompt 的"对话历史"区</li>
+     *   <li>推理完成后，将本轮 Q&amp;A 保存到会话中，供下轮调用时作为上下文</li>
+     *   <li>首轮对话时对话历史为空，行为与无会话模式一致</li>
+     * </ul>
+     *
+     * @param sessionId 会话标识，同一会话的多轮对话共享上下文；为 {@code null} 时退化为无会话模式
+     * @param question  用户当前轮的问题，不能为 {@code null} 或空白
+     * @return 模型的最终答案
+     */
+    public String run(String sessionId, String question) {
+        history.clear();
+        int currentStep = 0;
+        int consecutiveToolFailures = 0;
+
+        String conversationHistory = sessionId != null
+            ? sessionManager.prepareConversationHistory(sessionId, question)
+            : "";
+
+        while (currentStep < maxSteps) {
+            currentStep++;
+            System.out.println("--- 第 " + currentStep + " 步 ---");
+
+            String toolsDesc = toolExecutor.getAvailableTools();
+            String stepHistoryStr = String.join("\n", history);
+            String prompt = REACT_PROMPT_TEMPLATE
+                .replace("{tools}", toolsDesc)
+                .replace("{conversationHistory}", conversationHistory)
+                .replace("{question}", question)
+                .replace("{stepHistory}", stepHistoryStr);
+
+            List<Message> messages = List.of(new Message("user", prompt));
+            String responseText = llmClient.think(messages);
+
+            if (responseText == null || responseText.isBlank()) {
+                System.out.println("错误：大模型未能返回有效响应。");
+                return forceSummarizeAndSave(sessionId, question);
+            }
+
+            String thought = parseThought(responseText);
+            String action = parseAction(responseText);
+
+            if (thought != null) {
+                System.out.println("思考：" + thought);
+            }
+
+            if (action == null || action.isBlank()) {
+                System.out.println("警告：未能解析到有效的 Action。");
+                return forceSummarizeAndSave(sessionId, question);
+            }
+
+            if (action.startsWith("Finish")) {
+                Matcher finishMatcher = FINISH_PATTERN.matcher(action);
+                if (finishMatcher.matches()) {
+                    String finalAnswer = finishMatcher.group(1);
+                    System.out.println("🎉 最终答案：" + finalAnswer);
+                    saveTurn(sessionId, question, finalAnswer);
+                    return finalAnswer;
+                }
+            }
+
+            String[] toolParts = parseToolAction(action);
+            if (toolParts == null) {
+                System.out.println("警告：无效的 Action 格式，跳过。Action: " + action);
+                history.add("Action: " + action);
+                history.add("Observation: [格式无效，已跳过]");
+                continue;
+            }
+
+            String toolName = toolParts[0];
+            String toolInput = toolParts[1];
+            System.out.println("🎬 执行动作：" + toolName + "[" + toolInput + "]");
+
+            var tool = toolExecutor.getTool(toolName);
+            String observation;
+            boolean toolFailed;
+            if (tool == null) {
+                observation = "错误：名为 '" + toolName + "' 的工具未找到。";
+                toolFailed = true;
+            } else {
+                observation = tool.execute(toolInput);
+                toolFailed = observation != null && observation.startsWith("错误：");
+                if (!toolFailed && observation != null
+                    && observation.length() > OBSERVATION_COMPRESS_THRESHOLD) {
+                    observation = compressObservation(question, observation);
+                }
+            }
+
+            if (toolFailed) {
+                consecutiveToolFailures++;
+                System.out.println("⚠ 工具执行失败（连续失败 " + consecutiveToolFailures
+                    + "/" + MAX_CONSECUTIVE_TOOL_FAILURES + " 次）");
+                if (consecutiveToolFailures >= MAX_CONSECUTIVE_TOOL_FAILURES) {
+                    System.out.println("工具连续失败达到上限，触发强制总结。");
+                    history.add("Action: " + action);
+                    history.add("Observation: " + observation);
+                    return forceSummarizeAndSave(sessionId, question);
+                }
+            } else {
+                consecutiveToolFailures = 0;
+            }
+
+            System.out.println("👀 观察结果：" + observation);
+
+            history.add("Action: " + action);
+            history.add("Observation: " + observation);
+        }
+
+        System.out.println("已达到最大步数（" + maxSteps + " 步），触发强制总结。");
+        return forceSummarizeAndSave(sessionId, question);
+    }
+
+    private void saveTurn(String sessionId, String question, String answer) {
+        if (sessionId != null) {
+            sessionManager.addTurn(sessionId, question, answer);
+        }
+    }
+
+    /**
         history.clear();
         int currentStep = 0;
         int consecutiveToolFailures = 0;
@@ -259,8 +395,9 @@ public class ReActAgent {
             String historyStr = String.join("\n", history);
             String prompt = REACT_PROMPT_TEMPLATE
                 .replace("{tools}", toolsDesc)
+                .replace("{conversationHistory}", "")
                 .replace("{question}", question)
-                .replace("{history}", historyStr);
+                .replace("{stepHistory}", historyStr);
 
             // 2. 调用大模型，将模板作为 user 消息发送
             List<Message> messages = List.of(new Message("user", prompt));
@@ -382,6 +519,15 @@ public class ReActAgent {
 
         System.out.println("📝 强制总结结果：" + summary);
         return summary;
+    }
+
+    /**
+     * 强制总结并保存本轮对话到会话，使多轮对话上下文在下次调用时可见。
+     */
+    private String forceSummarizeAndSave(String sessionId, String question) {
+        String answer = forceSummarize(question);
+        saveTurn(sessionId, question, answer);
+        return answer;
     }
 
     /**

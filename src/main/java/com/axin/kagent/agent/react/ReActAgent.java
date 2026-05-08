@@ -134,6 +134,40 @@ public class ReActAgent {
     private static final Pattern FINISH_PATTERN =
         Pattern.compile("Finish\\[(.*)]", Pattern.DOTALL);
 
+    /**
+     * 强制总结 Prompt 模板。当达到最大步数或工具连续失败时，
+     * 不继续调用工具，而是要求模型基于已有历史记录给出当前最佳答案。
+     */
+    private static final String FORCED_SUMMARY_PROMPT = """
+        你已经进行了多步推理，收集了一些信息。现在不需要继续调用工具，
+        请根据以下历史记录，直接给出你目前能得出的最佳答案。
+        如果信息不足以完美回答，请坦诚说明当前掌握的部分信息以及缺失的部分。
+
+        原始问题：{question}
+
+        历史记录：
+        {history}
+
+        请直接输出你的最终答案：""";
+
+    /** 触发强制总结前，工具连续失败的次数阈值 */
+    private static final int MAX_CONSECUTIVE_TOOL_FAILURES = 2;
+
+    /** Observation 长度超过此阈值（字符数）时，触发 LLM 压缩，避免撑爆上下文窗口 */
+    private static final int OBSERVATION_COMPRESS_THRESHOLD = 1000;
+
+    /**
+     * Observation 压缩 Prompt 模板。当工具返回结果过长时，让 LLM 从中提取
+     * 与原始问题最相关的关键信息，丢弃无关内容。
+     */
+    private static final String OBSERVATION_COMPRESS_PROMPT = """
+        以下是工具返回的原始结果，内容较长。请提取与「{question}」最相关的关键信息，
+        用简洁的语言总结，控制在 500 字以内。只保留事实，不要添加你的分析或建议。
+
+        原始结果：
+        {observation}
+        """;
+
     /** 大模型客户端，所有 Agent 通过此单一入口调用 LLM */
     private final LlmClient llmClient;
 
@@ -202,17 +236,19 @@ public class ReActAgent {
      * <h3>终止条件</h3>
      * <ul>
      *   <li>模型输出 {@code Finish[最终答案]} — 正常终止，返回答案</li>
-     *   <li>达到最大步数 {@link #maxSteps} — 循环终止，返回 {@code null}</li>
-     *   <li>模型返回空响应 — 循环终止，返回 {@code null}</li>
-     *   <li>未能解析到有效 Action — 循环终止，返回 {@code null}</li>
+     *   <li>达到最大步数 {@link #maxSteps} — 触发强制总结，基于已有历史给出最佳答案</li>
+     *   <li>工具连续失败 {@link #MAX_CONSECUTIVE_TOOL_FAILURES} 次 — 触发强制总结</li>
+     *   <li>模型返回空响应 — 触发强制总结（如有历史）或返回提示信息</li>
+     *   <li>未能解析到有效 Action — 触发强制总结（如有历史）或返回提示信息</li>
      * </ul>
      *
      * @param question 用户问题，不能为 {@code null} 或空白
-     * @return 模型的最终答案；如果因异常终止（达到最大步数 / 解析失败 / 无响应）则返回 {@code null}
+     * @return 模型的最终答案；在最坏情况下返回提示信息，不再返回 {@code null}
      */
     public String run(String question) {
         history.clear();
         int currentStep = 0;
+        int consecutiveToolFailures = 0;
 
         while (currentStep < maxSteps) {
             currentStep++;
@@ -232,7 +268,7 @@ public class ReActAgent {
 
             if (responseText == null || responseText.isBlank()) {
                 System.out.println("错误：大模型未能返回有效响应。");
-                break;
+                return forceSummarize(question);
             }
 
             // 3. 解析模型输出，提取 Thought 和 Action
@@ -244,8 +280,8 @@ public class ReActAgent {
             }
 
             if (action == null || action.isBlank()) {
-                System.out.println("警告：未能解析到有效的 Action，流程终止。");
-                break;
+                System.out.println("警告：未能解析到有效的 Action。");
+                return forceSummarize(question);
             }
 
             // 4. 执行动作：判断是工具调用还是最终答案
@@ -262,6 +298,8 @@ public class ReActAgent {
             String[] toolParts = parseToolAction(action);
             if (toolParts == null) {
                 System.out.println("警告：无效的 Action 格式，跳过。Action: " + action);
+                history.add("Action: " + action);
+                history.add("Observation: [格式无效，已跳过]");
                 continue;
             }
 
@@ -272,10 +310,33 @@ public class ReActAgent {
             // 4b. 查找工具并执行，获取观察结果
             var tool = toolExecutor.getTool(toolName);
             String observation;
+            boolean toolFailed;
             if (tool == null) {
                 observation = "错误：名为 '" + toolName + "' 的工具未找到。";
+                toolFailed = true;
             } else {
                 observation = tool.execute(toolInput);
+                toolFailed = observation != null && observation.startsWith("错误：");
+                // 工具成功但结果过长时，用 LLM 压缩，提取与问题相关的关键信息
+                if (!toolFailed && observation != null
+                    && observation.length() > OBSERVATION_COMPRESS_THRESHOLD) {
+                    observation = compressObservation(question, observation);
+                }
+            }
+
+            // 跟踪工具失败，连续失败达到阈值时触发强制总结
+            if (toolFailed) {
+                consecutiveToolFailures++;
+                System.out.println("⚠ 工具执行失败（连续失败 " + consecutiveToolFailures
+                    + "/" + MAX_CONSECUTIVE_TOOL_FAILURES + " 次）");
+                if (consecutiveToolFailures >= MAX_CONSECUTIVE_TOOL_FAILURES) {
+                    System.out.println("工具连续失败达到上限，触发强制总结。");
+                    history.add("Action: " + action);
+                    history.add("Observation: " + observation);
+                    return forceSummarize(question);
+                }
+            } else {
+                consecutiveToolFailures = 0;
             }
 
             System.out.println("👀 观察结果：" + observation);
@@ -285,8 +346,73 @@ public class ReActAgent {
             history.add("Observation: " + observation);
         }
 
-        System.out.println("已达到最大步数，流程终止。");
-        return null;
+        // 达到最大步数，触发强制总结
+        System.out.println("已达到最大步数（" + maxSteps + " 步），触发强制总结。");
+        return forceSummarize(question);
+    }
+
+    /**
+     * 基于已有的历史记录，要求模型给出当前最佳答案，不再调用工具。
+     *
+     * <p>这是"软着陆"机制：当 ReAct 循环因达到步数上限或工具连续失败而终止时，
+     * 不让已收集的信息白费，而是让模型基于现有 Observation 给出尽可能好的答案。
+     *
+     * <p>如果历史记录为空或 LLM 调用失败，则返回降级提示信息，保证不返回 {@code null}。
+     *
+     * @param question 原始用户问题
+     * @return 基于历史记录的最佳答案，或降级提示信息
+     */
+    private String forceSummarize(String question) {
+        String historyStr = String.join("\n", history);
+
+        // 无任何历史记录时，无法做有意义的总结，直接返回降级信息
+        if (historyStr.isBlank()) {
+            return "抱歉，推理过程尚未收集到任何有效信息，无法回答您的问题：「" + question + "」";
+        }
+
+        String prompt = FORCED_SUMMARY_PROMPT
+            .replace("{question}", question)
+            .replace("{history}", historyStr);
+
+        String summary = llmClient.think(List.of(new Message("user", prompt)));
+
+        if (summary == null || summary.isBlank()) {
+            return "抱歉，推理过程已收集以下信息，但无法生成最终总结：\n" + historyStr;
+        }
+
+        System.out.println("📝 强制总结结果：" + summary);
+        return summary;
+    }
+
+    /**
+     * 对过长的 Observation 做语义压缩，用 LLM 提取与问题相关的关键信息。
+     *
+     * <p>短结果不经处理直接返回，不触发额外 LLM 调用（调用方已在外部判断长度阈值）。
+     *
+     * <p>如果压缩调用失败，降级返回截断后的原文，保证不丢失信息。
+     *
+     * @param question    原始用户问题，用于引导提取方向
+     * @param observation 工具返回的原始结果
+     * @return 压缩后的关键信息摘要；压缩失败时返回截断的原文
+     */
+    private String compressObservation(String question, String observation) {
+        String prompt = OBSERVATION_COMPRESS_PROMPT
+            .replace("{question}", question)
+            .replace("{observation}", observation);
+
+        System.out.println("📦 Observation 过长（" + observation.length()
+            + " 字符），正在调用 LLM 压缩...");
+        String compressed = llmClient.think(List.of(new Message("user", prompt)));
+
+        if (compressed == null || compressed.isBlank()) {
+            System.out.println("⚠ 压缩失败，降级为截断原文前 " + OBSERVATION_COMPRESS_THRESHOLD + " 字符");
+            return observation.substring(0, OBSERVATION_COMPRESS_THRESHOLD)
+                + "\n...[内容过长，已截断]";
+        }
+
+        System.out.println("📦 压缩完成：原始 " + observation.length()
+            + " 字符 → " + compressed.length() + " 字符");
+        return compressed;
     }
 
     /**

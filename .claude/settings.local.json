@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./mvnw compile *)",
+      "Bash(java -version)",
+      "Bash(javac -version)",
+      "Bash(./mvnw test *)",
+      "Bash(./mvnw dependency:tree -q -Dincludes=io.reactivex*)",
+      "Bash(./mvnw dependency:tree -q)",
+      "Bash(javap -public -cp agentscope-1.0.12.jar io.agentscope.core.agent.AgentBase)",
+      "Bash(javap -public -cp agentscope-1.0.12.jar io.agentscope.core.agent.Agent)",
+      "Bash(javap -public -cp agentscope-1.0.12.jar io.agentscope.core.pipeline.MsgHub)",
+      "Bash(javap -public -cp agentscope-1.0.12.jar io.agentscope.core.pipeline.Pipelines)",
+      "Bash(javap -cp agentscope-1.0.12.jar io.agentscope.core.agent.AgentBase)",
+      "Bash(jar tf *)",
+      "Bash(grep -E \"\\\\.class$\")",
+      "Bash(javap -cp agentscope-1.0.12.jar 'io.agentscope.core.pipeline.MsgHub$Builder')",
+      "Bash(javap -cp agentscope-1.0.12.jar io.agentscope.core.memory.Memory)",
+      "Bash(javap -cp agentscope-1.0.12.jar io.agentscope.core.memory.InMemoryMemory)",
+      "Bash(javap -cp agentscope-1.0.12.jar io.agentscope.core.ReActAgent)",
+      "Bash(javap -cp agentscope-1.0.12.jar io.agentscope.core.model.Model)",
+      "Bash(javap -cp agentscope-1.0.12.jar io.agentscope.core.agent.StructuredOutputCapableAgent)",
+      "Bash(./mvnw test-compile *)"
+    ]
+  }
+}

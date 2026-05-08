@@ -1,0 +1,12 @@
+spring:
+  ai:
+    openai:
+      api-key: ${DEEPSEEK_API_KEY:sk-c0c72dfbf6a14e2aa0b18c421b718548} # 使用环境变量，避免硬编码
+      base-url: https://api.deepseek.com
+      chat:
+        options:
+          model: deepseek-v4-flash
+
+serp-api:
+  api-key: ${SERPAPI_API_KEY:77324aad16e2bf5c7d16eec65a46b0b3830492496ac5cf178ff44a3570aadf4d}
+  base-url: https://serpapi.com/search

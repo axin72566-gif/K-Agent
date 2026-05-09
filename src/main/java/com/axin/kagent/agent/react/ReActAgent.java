@@ -2,6 +2,7 @@ package com.axin.kagent.agent.react;
 
 import com.axin.kagent.llm.LlmClient;
 import com.axin.kagent.llm.Message;
+import com.axin.kagent.session.FactManager;
 import com.axin.kagent.session.SessionManager;
 import com.axin.kagent.session.UserProfileManager;
 import com.axin.kagent.tool.ToolExecutor;
@@ -70,6 +71,7 @@ public class ReActAgent {
     private static final String REACT_PROMPT_TEMPLATE = """
         请注意，你是一个能够调用外部工具的智能助手。
         {userProfile}
+        {factMemory}
         可用工具如下：
         {tools}
 
@@ -201,50 +203,47 @@ public class ReActAgent {
     /** 用户画像管理器，管理跨会话长期记忆（可为 null，表示不启用画像功能） */
     private final UserProfileManager userProfileManager;
 
+    /** 事实记忆管理器（可为 null，表示不启用事实检索） */
+    private final FactManager factManager;
+
     /**
-     * 创建 ReActAgent 并指定最大步数（含用户画像管理器）。
+     * 创建 ReActAgent 并指定最大步数（含全部记忆系统）。
      */
     public ReActAgent(LlmClient llmClient, ToolExecutor toolExecutor,
                       SessionManager sessionManager, UserProfileManager userProfileManager,
-                      int maxSteps) {
+                      FactManager factManager, int maxSteps) {
         this.llmClient = llmClient;
         this.toolExecutor = toolExecutor;
         this.sessionManager = sessionManager;
         this.userProfileManager = userProfileManager;
+        this.factManager = factManager;
         this.maxSteps = maxSteps;
         this.history = new ArrayList<>();
     }
 
     /**
-     * 创建 ReActAgent，使用默认最大步数 5（含用户画像管理器）。
+     * 创建 ReActAgent，使用默认最大步数 5（含全部记忆系统）。
      */
     public ReActAgent(LlmClient llmClient, ToolExecutor toolExecutor,
-                      SessionManager sessionManager, UserProfileManager userProfileManager) {
-        this(llmClient, toolExecutor, sessionManager, userProfileManager, 5);
+                      SessionManager sessionManager, UserProfileManager userProfileManager,
+                      FactManager factManager) {
+        this(llmClient, toolExecutor, sessionManager, userProfileManager, factManager, 5);
     }
 
     /**
-     * 创建 ReActAgent 并指定最大步数（不启用用户画像）。
-     *
-     * @param llmClient    大模型客户端，不能为 {@code null}
-     * @param toolExecutor 工具执行器，包含已注册的工具列表，不能为 {@code null}
-     * @param maxSteps     ReAct 循环的最大步数，建议取值范围 3~10
+     * 创建 ReActAgent 并指定最大步数（不启用用户画像和事实记忆）。
      */
     public ReActAgent(LlmClient llmClient, ToolExecutor toolExecutor,
                       SessionManager sessionManager, int maxSteps) {
-        this(llmClient, toolExecutor, sessionManager, null, maxSteps);
+        this(llmClient, toolExecutor, sessionManager, null, null, maxSteps);
     }
 
     /**
-     * 创建 ReActAgent，使用默认最大步数 5（不启用用户画像）。
-     *
-     * @param llmClient      大模型客户端，不能为 {@code null}
-     * @param toolExecutor   工具执行器，包含已注册的工具列表，不能为 {@code null}
-     * @param sessionManager 会话管理器，管理多轮对话上下文，不能为 {@code null}
+     * 创建 ReActAgent，使用默认最大步数 5（不启用用户画像和事实记忆）。
      */
     public ReActAgent(LlmClient llmClient, ToolExecutor toolExecutor,
                       SessionManager sessionManager) {
-        this(llmClient, toolExecutor, sessionManager, null, 5);
+        this(llmClient, toolExecutor, sessionManager, null, null, 5);
     }
 
     /**
@@ -316,6 +315,15 @@ public class ReActAgent {
             }
         }
 
+        // 检索事实记忆
+        String factMemoryText = "";
+        if (userId != null && factManager != null) {
+            List<String> facts = factManager.searchFacts(userId, question);
+            if (!facts.isEmpty()) {
+                factMemoryText = factManager.formatForPrompt(facts);
+            }
+        }
+
         String conversationHistory = sessionId != null
             ? sessionManager.prepareConversationHistory(sessionId, question)
             : "";
@@ -328,6 +336,7 @@ public class ReActAgent {
             String stepHistoryStr = String.join("\n", history);
             String prompt = REACT_PROMPT_TEMPLATE
                 .replace("{userProfile}", userProfileText)
+                .replace("{factMemory}", factMemoryText)
                 .replace("{tools}", toolsDesc)
                 .replace("{conversationHistory}", conversationHistory)
                 .replace("{question}", question)
@@ -420,6 +429,9 @@ public class ReActAgent {
         }
         if (userId != null && userProfileManager != null) {
             userProfileManager.extractAndUpdate(userId, question, answer);
+        }
+        if (userId != null && factManager != null) {
+            factManager.extractAndIndex(userId, question, answer);
         }
     }
 

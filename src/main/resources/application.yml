@@ -1,14 +1,25 @@
 spring:
   ai:
+    vectorstore:
+      qdrant:
+        host: 192.168.60.133
+        port: 6334                # gRPC 端口
+        collection-name: user_facts
+        initialize-schema: true   # 允许自动创建集合并初始化
     openai:
       api-key: ${DEEPSEEK_API_KEY:sk-c0c72dfbf6a14e2aa0b18c421b718548} # 使用环境变量，避免硬编码
       base-url: https://api.deepseek.com
       chat:
         options:
           model: deepseek-v4-flash
+      embedding:
+        api-key: ${DEEPSEEK_API_KEY:sk-06700e91df384f1f8a5eb8f708a8183d}
+        base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+        options:
+          model: text-embedding-v4
   data:
     redis:
-      host: 192.168.60.131
+      host: 192.168.60.133
       port: 6379
       database: 0
       timeout: 60000
@@ -19,9 +30,9 @@ spring:
           min-idle: 0        # 最小空闲连接数，默认0
           max-wait: -1ms     # 连接池耗尽时，最大等待时间，-1表示永不超时
   datasource:
-    url: jdbc:mysql://192.168.60.131:3306/k_agent?useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=utf8mb4&allowPublicKeyRetrieval=true
+    url: jdbc:mysql://192.168.60.133:3306/k_agent?useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=utf8mb4&allowPublicKeyRetrieval=true
     username: root
-    password: kdkt1412@
+    password: 123456
     driver-class-name: com.mysql.cj.jdbc.Driver
     # HikariCP连接池配置
     hikari:

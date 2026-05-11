@@ -5,6 +5,7 @@ import com.axin.kagent.llm.Message;
 import com.axin.kagent.session.FactManager;
 import com.axin.kagent.session.SessionManager;
 import com.axin.kagent.session.UserProfileManager;
+import com.axin.kagent.tool.KnowledgeBaseManager;
 import com.axin.kagent.tool.ToolExecutor;
 
 import java.util.ArrayList;
@@ -72,6 +73,7 @@ public class ReActAgent {
         请注意，你是一个能够调用外部工具的智能助手。
         {userProfile}
         {factMemory}
+        {knowledgeContext}
         可用工具如下：
         {tools}
 
@@ -206,28 +208,34 @@ public class ReActAgent {
     /** 事实记忆管理器（可为 null，表示不启用事实检索） */
     private final FactManager factManager;
 
+    /** 知识库管理器（可为 null，表示不启用 RAG 被动注入） */
+    private final KnowledgeBaseManager knowledgeBaseManager;
+
     /**
      * 创建 ReActAgent 并指定最大步数（含全部记忆系统）。
      */
     public ReActAgent(LlmClient llmClient, ToolExecutor toolExecutor,
                       SessionManager sessionManager, UserProfileManager userProfileManager,
-                      FactManager factManager, int maxSteps) {
+                      FactManager factManager, KnowledgeBaseManager knowledgeBaseManager,
+                      int maxSteps) {
         this.llmClient = llmClient;
         this.toolExecutor = toolExecutor;
         this.sessionManager = sessionManager;
         this.userProfileManager = userProfileManager;
         this.factManager = factManager;
+        this.knowledgeBaseManager = knowledgeBaseManager;
         this.maxSteps = maxSteps;
         this.history = new ArrayList<>();
     }
 
     /**
-     * 创建 ReActAgent，使用默认最大步数 5（含全部记忆系统）。
+     * 创建 ReActAgent，使用默认最大步数 5（含全部记忆系统 + RAG）。
      */
     public ReActAgent(LlmClient llmClient, ToolExecutor toolExecutor,
                       SessionManager sessionManager, UserProfileManager userProfileManager,
-                      FactManager factManager) {
-        this(llmClient, toolExecutor, sessionManager, userProfileManager, factManager, 5);
+                      FactManager factManager, KnowledgeBaseManager knowledgeBaseManager) {
+        this(llmClient, toolExecutor, sessionManager, userProfileManager, factManager,
+            knowledgeBaseManager, 5);
     }
 
     /**
@@ -235,7 +243,7 @@ public class ReActAgent {
      */
     public ReActAgent(LlmClient llmClient, ToolExecutor toolExecutor,
                       SessionManager sessionManager, int maxSteps) {
-        this(llmClient, toolExecutor, sessionManager, null, null, maxSteps);
+        this(llmClient, toolExecutor, sessionManager, null, null, null, maxSteps);
     }
 
     /**
@@ -243,7 +251,7 @@ public class ReActAgent {
      */
     public ReActAgent(LlmClient llmClient, ToolExecutor toolExecutor,
                       SessionManager sessionManager) {
-        this(llmClient, toolExecutor, sessionManager, null, null, 5);
+        this(llmClient, toolExecutor, sessionManager, null, null, null, 5);
     }
 
     /**
@@ -324,9 +332,20 @@ public class ReActAgent {
             }
         }
 
+        // 加载对话历史（知识库 Query 改写需要此上下文）
         String conversationHistory = sessionId != null
             ? sessionManager.prepareConversationHistory(sessionId, question)
             : "";
+
+        // 知识库被动注入（用对话历史改写 query 后再检索）
+        String knowledgeContextText = "";
+        if (knowledgeBaseManager != null) {
+            String searchContext = conversationHistory.isBlank() ? null : conversationHistory;
+            var docs = knowledgeBaseManager.search(question, searchContext);
+            if (!docs.isEmpty()) {
+                knowledgeContextText = knowledgeBaseManager.formatForPrompt(docs);
+            }
+        }
 
         while (currentStep < maxSteps) {
             currentStep++;
@@ -337,6 +356,7 @@ public class ReActAgent {
             String prompt = REACT_PROMPT_TEMPLATE
                 .replace("{userProfile}", userProfileText)
                 .replace("{factMemory}", factMemoryText)
+                .replace("{knowledgeContext}", knowledgeContextText)
                 .replace("{tools}", toolsDesc)
                 .replace("{conversationHistory}", conversationHistory)
                 .replace("{question}", question)

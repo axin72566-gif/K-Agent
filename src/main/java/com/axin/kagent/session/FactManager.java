@@ -8,6 +8,7 @@ import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.ai.vectorstore.filter.Filter;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -46,8 +47,8 @@ public class FactManager {
     private final LlmClient llmClient;
     private final ObjectMapper objectMapper;
 
-    public FactManager(VectorStore vectorStore, LlmClient llmClient,
-                       ObjectMapper objectMapper) {
+    public FactManager(VectorStore vectorStore,
+                       LlmClient llmClient, ObjectMapper objectMapper) {
         this.vectorStore = vectorStore;
         this.llmClient = llmClient;
         this.objectMapper = objectMapper;
